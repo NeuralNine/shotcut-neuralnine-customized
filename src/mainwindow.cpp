@@ -349,6 +349,8 @@ void MainWindow::setupAndConnectPlayerWidget()
     ui->menuPlayer->addAction(Actions["playerSeekEndAction"]);
     ui->menuPlayer->addAction(Actions["playerNextFrameAction"]);
     ui->menuPlayer->addAction(Actions["playerPreviousFrameAction"]);
+    ui->menuPlayer->addAction(Actions["playerForwardHalfSecondAction"]);
+    ui->menuPlayer->addAction(Actions["playerBackwardHalfSecondAction"]);
     ui->menuPlayer->addAction(Actions["playerForwardOneSecondAction"]);
     ui->menuPlayer->addAction(Actions["playerBackwardOneSecondAction"]);
     ui->menuPlayer->addAction(Actions["playerForwardTwoSecondsAction"]);

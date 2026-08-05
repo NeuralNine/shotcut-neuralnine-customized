@@ -667,6 +667,18 @@ void Player::setupActions()
     connect(action, &QAction::triggered, this, [&]() { seekBy(-qRound(MLT.profile().fps())); });
     Actions.add("playerBackwardOneSecondAction", action);
 
+    action = new QAction(tr("Forward Half Second"), this);
+    action->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_Right));
+    connect(action, &QAction::triggered, this, [&]() { seekBy(qRound(MLT.profile().fps() / 2.0)); });
+    Actions.add("playerForwardHalfSecondAction", action);
+
+    action = new QAction(tr("Backward Half Second"), this);
+    action->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_Left));
+    connect(action, &QAction::triggered, this, [&]() {
+        seekBy(-qRound(MLT.profile().fps() / 2.0));
+    });
+    Actions.add("playerBackwardHalfSecondAction", action);
+
     action = new QAction(tr("Forward Two Seconds"), this);
     action->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_PageDown));
     connect(action, &QAction::triggered, this, [&]() { seekBy(2 * qRound(MLT.profile().fps())); });
@@ -1295,7 +1307,10 @@ void Player::layoutToolbars()
 
 void Player::seekBy(int frames)
 {
-    auto newPosition = position() + frames;
+    // Accumulate from the last requested position rather than the currently displayed one so
+    // that repeated presses keep advancing instead of being dropped while a seek is still
+    // decoding. m_requestedPosition is reset to the actual position once a frame is displayed.
+    auto newPosition = m_requestedPosition + frames;
     if (MLT.producer() && newPosition != m_requestedPosition) {
         m_requestedPosition = newPosition;
         seek(m_requestedPosition);
