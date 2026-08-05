@@ -172,6 +172,7 @@ public slots:
     void fadeOut(int trackIndex, int clipIndex = -1, int duration = -1);
     void seekPreviousEdit();
     void seekNextEdit();
+    void seekSilenceBoundary(int direction);
     void seekInPoint(int clipIndex);
     void clearSelectionIfInvalid();
     void insertTrack();
@@ -224,6 +225,16 @@ private:
     bool nothingIsSelected();
     bool isTransition(int trackIndex, int clipIndex);
     bool isEmptyTrack(Mlt::Playlist &playlist);
+    /// A run of frames on a track that is either meaningful sound or not.
+    struct AudioSegment
+    {
+        int start;
+        int end; ///< One past the last frame.
+        bool isSound;
+    };
+    QVector<AudioSegment> audioSegments(Mlt::Playlist &playlist, bool *levelsReady);
+    qreal audioLevelAt(Mlt::Playlist &playlist, int position);
+    qreal audioGainFactor(Mlt::Producer *producer);
     void emitNonSeekableWarning();
     void emitClipExtendStatus(int cappedOut, int requestedOut, int currentOut);
     int limitClipOut(Mlt::Playlist &playlist, int clipIndex, int in, int frameCount, int out);

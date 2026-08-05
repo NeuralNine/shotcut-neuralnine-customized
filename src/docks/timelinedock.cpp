@@ -50,6 +50,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QBitArray>
 #include <QClipboard>
 #include <QDialogButtonBox>
 #include <QGuiApplication>
@@ -63,6 +64,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidgetAction>
+#include <QtMath>
 #include <qlistwidget.h>
 
 static const char *kFileUrlProtocol = "file://";
@@ -233,6 +235,10 @@ TimelineDock::TimelineDock(QWidget *parent)
     viewMenu->addAction(Actions["timelineZoomFitAction"]);
     viewMenu->addAction(Actions["timelinePropertiesAction"]);
     m_mainMenu->addMenu(viewMenu);
+    QMenu *navigateMenu = new QMenu(tr("Navigate"), this);
+    navigateMenu->addAction(Actions["timelinePrevSilenceAction"]);
+    navigateMenu->addAction(Actions["timelineNextSilenceAction"]);
+    m_mainMenu->addMenu(navigateMenu);
     QMenu *markerMenu = new QMenu(tr("Marker"), this);
     markerMenu->addAction(Actions["timelineMarkerAction"]);
     markerMenu->addAction(Actions["timelinePrevMarkerAction"]);
@@ -1135,6 +1141,32 @@ void TimelineDock::setupActions()
         seekNextMarker();
     });
     Actions.add("timelineNextMarkerAction", action);
+
+    action = new QAction(tr("Next Silence or Sound"), this);
+    action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Right));
+    action->setToolTip(tr("Seek forward to the next silence, or to the next sound when already "
+                          "in a silence"));
+    connect(action, &QAction::triggered, this, [&]() {
+        if (!isMultitrackValid())
+            return;
+        show();
+        raise();
+        seekSilenceBoundary(1);
+    });
+    Actions.add("timelineNextSilenceAction", action);
+
+    action = new QAction(tr("Previous Silence or Sound"), this);
+    action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Left));
+    action->setToolTip(tr("Seek backward to the previous silence, or to the previous sound when "
+                          "already in a silence"));
+    connect(action, &QAction::triggered, this, [&]() {
+        if (!isMultitrackValid())
+            return;
+        show();
+        raise();
+        seekSilenceBoundary(-1);
+    });
+    Actions.add("timelinePrevSilenceAction", action);
 
     action = new QAction(tr("Delete Marker"), this);
     action->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
@@ -4636,6 +4668,260 @@ void TimelineDock::seekNextEdit()
                                    playlist.clip_start(clipIndex) + playlist.clip_length(clipIndex));
         }
     }
+    if (newPosition != m_position)
+        setPosition(newPosition);
+}
+
+/*!
+    \internal
+    \brief Returns the peak audio level in the range [0, 1] at timeline position \a position on
+    \a playlist, or -1 if the level is unknown (no cached waveform data yet).
+
+    This reads the same cached audio levels that the timeline waveforms are drawn from, so no
+    decoding is done here. See AudioLevelsTask, which stores two interleaved unsigned char values
+    (one per channel) for every source frame and scales them by 0.9 so that clipping can exceed
+    full scale.
+*/
+
+qreal TimelineDock::audioLevelAt(Mlt::Playlist &playlist, int position)
+{
+    const int channels = 2;
+    int clipIndex = playlist.get_clip_index_at(position);
+    if (clipIndex < 0 || clipIndex >= playlist.count() || playlist.is_blank(clipIndex))
+        return 0.0;
+
+    QScopedPointer<Mlt::ClipInfo> info(playlist.clip_info(clipIndex));
+    if (!info || !info->producer || !info->producer->is_valid() || !info->cut)
+        return 0.0;
+
+    // A muted track or clip contributes no audible sound.
+    if (info->cut->get_int("hide") & 2)
+        return 0.0;
+
+    info->producer->lock();
+    QByteArray *levels = static_cast<QByteArray *>(info->producer->get_data(kAudioLevelsProperty));
+    if (!levels) {
+        info->producer->unlock();
+        // Audio levels have not been generated (yet) for this clip.
+        return -1.0;
+    }
+
+    // Map the timeline position to a frame of the source producer.
+    double speed = 1.0;
+    if (!qstrcmp("timewarp", info->producer->get("mlt_service")))
+        speed = info->producer->get_double("warp_speed");
+    double sourceFrame = info->frame_in + (position - info->start) * speed;
+
+    // AudioLevelsTask generates one sample per channel per frame of its own default Mlt::Profile,
+    // which is not necessarily the project profile or the clip's frame rate. Convert through
+    // seconds so that clips whose frame rate differs from the levels' frame rate still line up.
+    // A default Mlt::Profile is exactly what AudioLevelsTask constructs.
+    static const Mlt::Profile levelsProfile;
+    double sourceFps = info->fps > 0.0 ? info->fps : MLT.profile().fps();
+    double levelsFps = const_cast<Mlt::Profile &>(levelsProfile).fps();
+    int index = channels
+                * (levelsFps > 0.0 && sourceFps > 0.0 ? qRound(sourceFrame / sourceFps * levelsFps)
+                                                      : qRound(sourceFrame));
+
+    qreal peak = 0.0;
+    if (index >= 0 && (index + channels) <= levels->size()) {
+        for (int channel = 0; channel < channels; channel++) {
+            // Undo the 0.9 scaling that AudioLevelsTask applied.
+            qreal level = static_cast<quint8>(levels->at(index + channel)) / 256.0 / 0.9;
+            peak = qMax(peak, qMin(level, 1.0));
+        }
+    }
+    info->producer->unlock();
+
+    // Apply the clip's gain/volume so that a clip turned down counts as quieter.
+    peak *= audioGainFactor(info->producer);
+
+    return peak;
+}
+
+/*!
+    \internal
+    \brief Returns the linear gain multiplier of the clip's gain filter on \a producer, or 1.0.
+*/
+
+qreal TimelineDock::audioGainFactor(Mlt::Producer *producer)
+{
+    if (!producer || !producer->is_valid())
+        return 1.0;
+    QScopedPointer<Mlt::Filter> filter(MLT.getFilter("audioGain", producer));
+    if (!filter || !filter->is_valid() || filter->get_int("disable"))
+        return 1.0;
+    // A keyframed gain has no single value, so ignore it rather than guess.
+    mlt_animation animation = filter->get_animation("level");
+    if (animation && mlt_animation_key_count(animation) > 1)
+        return 1.0;
+    // "level" is in dB.
+    return qPow(10.0, filter->get_double("level") / 20.0);
+}
+
+/*!
+    \internal
+    \brief Splits the current track into alternating runs of meaningful sound and everything
+    else, and returns them in order.
+
+    A run of audio above the threshold only counts as meaningful sound when it lasts at least
+    the configured minimum; shorter bursts such as a cough are absorbed into the surrounding
+    quiet so that they do not break up a silence stretch.
+*/
+
+QVector<TimelineDock::AudioSegment> TimelineDock::audioSegments(Mlt::Playlist &playlist,
+                                                                bool *levelsReady)
+{
+    QVector<AudioSegment> segments;
+    const int n = playlist.get_playtime();
+    if (n <= 0)
+        return segments;
+
+    const qreal threshold = qPow(10.0, Settings.timelineSilenceThreshold() / 20.0);
+    const double fps = MLT.profile().fps();
+    const int minMeaningful = qMax(1, qRound(Settings.timelineMeaningfulSoundDuration() * fps));
+    const int minSilence = qMax(1, qRound(Settings.timelineSilenceDuration() * fps));
+
+    // Read the level of every frame once.
+    QBitArray loud(n, false);
+    bool sawLevels = false;
+    for (int i = 0; i < n; i++) {
+        qreal level = audioLevelAt(playlist, i);
+        if (level >= 0.0)
+            sawLevels = true;
+        else
+            level = 0.0;
+        if (level >= threshold)
+            loud.setBit(i);
+    }
+    if (levelsReady)
+        *levelsReady = sawLevels;
+
+    // Only a quiet run longer than the silence duration counts as silence, so anything shorter
+    // (a syllable gap, a breath, a pause between words) stays part of the sound around it.
+    QBitArray meaningful(n, false);
+    int i = 0;
+    while (i < n) {
+        if (!loud.testBit(i)) {
+            ++i;
+            continue;
+        }
+        int end = i; // one past the last loud frame in this region
+        int j = i;
+        while (j < n) {
+            if (loud.testBit(j)) {
+                end = j + 1;
+                ++j;
+                continue;
+            }
+            int gap = j;
+            while (gap < n && !loud.testBit(gap))
+                ++gap;
+            if (gap - j > minSilence)
+                break; // long enough to be real silence: the sound region ends here
+            j = gap;
+        }
+        if (end - i >= minMeaningful)
+            meaningful.fill(true, i, end);
+        i = qMax(end, i + 1);
+    }
+
+    // Collapse the marks into alternating segments.
+    i = 0;
+    while (i < n) {
+        bool isSound = meaningful.testBit(i);
+        int j = i;
+        while (j < n && meaningful.testBit(j) == isSound)
+            ++j;
+        segments.append({i, j, isSound});
+        i = j;
+    }
+    return segments;
+}
+
+/*!
+    \internal
+    \brief Seeks to the next or previous boundary between a silence stretch and meaningful
+    sound on the current track. \a direction is 1 to search forward, -1 to search backward.
+
+    When the playhead is inside a silence stretch this seeks to meaningful sound, and otherwise
+    to the next silence stretch, so that repeated presses alternate between the two.
+*/
+
+void TimelineDock::seekSilenceBoundary(int direction)
+{
+    if (!isMultitrackValid())
+        return;
+
+    int trackIndex = currentTrack();
+    if (trackIndex < 0 || trackIndex >= m_model.trackList().size())
+        return;
+    QScopedPointer<Mlt::Producer> track(
+        m_model.tractor()->track(m_model.trackList().at(trackIndex).mlt_index));
+    if (!track || !track->is_valid())
+        return;
+    Mlt::Playlist playlist(*track);
+    if (!playlist.is_valid() || isEmptyTrack(playlist))
+        return;
+
+    bool levelsReady = false;
+    const auto segments = audioSegments(playlist, &levelsReady);
+    if (segments.isEmpty())
+        return;
+    if (!levelsReady) {
+        emit showStatusMessage(
+            tr("Audio waveforms are still being generated. Try again in a moment."));
+        return;
+    }
+
+    const double fps = MLT.profile().fps();
+    const int minSilence = qMax(1, qRound(Settings.timelineSilenceDuration() * fps));
+    auto isSilenceStretch = [&](const AudioSegment &segment) {
+        return !segment.isSound && (segment.end - segment.start) > minSilence;
+    };
+
+    // Decide what to look for based on where the playhead is now.
+    bool inSilence = false;
+    for (const auto &segment : segments) {
+        if (m_position >= segment.start && m_position < segment.end) {
+            inSilence = isSilenceStretch(segment);
+            break;
+        }
+    }
+
+    int newPosition = -1;
+    if (direction > 0) {
+        for (const auto &segment : segments) {
+            if (segment.start <= m_position)
+                continue;
+            if (inSilence ? segment.isSound : isSilenceStretch(segment)) {
+                newPosition = segment.start;
+                break;
+            }
+        }
+    } else {
+        for (int i = segments.size() - 1; i >= 0; --i) {
+            const auto &segment = segments.at(i);
+            if (segment.end >= m_position + 1)
+                continue;
+            if (inSilence ? segment.isSound : isSilenceStretch(segment)) {
+                // Land on the end of the previous stretch rather than its start.
+                newPosition = segment.end - 1;
+                break;
+            }
+        }
+    }
+
+    if (newPosition < 0) {
+        if (inSilence)
+            emit showStatusMessage(direction > 0 ? tr("No further sound found on this track")
+                                                 : tr("No earlier sound found on this track"));
+        else
+            emit showStatusMessage(direction > 0 ? tr("No further silence found on this track")
+                                                 : tr("No earlier silence found on this track"));
+        return;
+    }
+
     if (newPosition != m_position)
         setPosition(newPosition);
 }

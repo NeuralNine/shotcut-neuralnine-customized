@@ -1105,6 +1105,54 @@ void ShotcutSettings::setTimelineShowWaveforms(bool b)
     \brief Whether video thumbnails are shown on timeline clips.
 */
 
+/*!
+    \qmlproperty double Settings::timelineSilenceThreshold
+    \brief The loudness in dBFS at or above which audio counts as sound when navigating
+    between silence and sound in the timeline.
+*/
+
+double ShotcutSettings::timelineSilenceThreshold() const
+{
+    return settings.value("timeline/silenceThreshold", -18.0).toDouble();
+}
+
+void ShotcutSettings::setTimelineSilenceThreshold(double d)
+{
+    settings.setValue("timeline/silenceThreshold", d);
+}
+
+/*!
+    \qmlproperty double Settings::timelineSilenceDuration
+    \brief The minimum number of seconds without meaningful sound that counts as a silence
+    stretch when navigating the timeline.
+*/
+
+double ShotcutSettings::timelineSilenceDuration() const
+{
+    return settings.value("timeline/silenceDuration", 2.0).toDouble();
+}
+
+void ShotcutSettings::setTimelineSilenceDuration(double d)
+{
+    settings.setValue("timeline/silenceDuration", d);
+}
+
+/*!
+    \qmlproperty double Settings::timelineMeaningfulSoundDuration
+    \brief The minimum number of seconds a run of audio must last to count as meaningful
+    sound. Shorter bursts, such as a cough, are treated as part of the surrounding silence.
+*/
+
+double ShotcutSettings::timelineMeaningfulSoundDuration() const
+{
+    return settings.value("timeline/meaningfulSoundDuration", 5.0).toDouble();
+}
+
+void ShotcutSettings::setTimelineMeaningfulSoundDuration(double d)
+{
+    settings.setValue("timeline/meaningfulSoundDuration", d);
+}
+
 bool ShotcutSettings::timelineShowThumbnails() const
 {
     return settings.value("timeline/thumbnails", true).toBool();

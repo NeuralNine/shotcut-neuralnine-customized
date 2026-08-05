@@ -236,6 +236,12 @@ public:
     void setTimelineDragScrub(bool);
     bool timelineShowWaveforms() const;
     void setTimelineShowWaveforms(bool);
+    double timelineSilenceThreshold() const;
+    void setTimelineSilenceThreshold(double);
+    double timelineSilenceDuration() const;
+    void setTimelineSilenceDuration(double);
+    double timelineMeaningfulSoundDuration() const;
+    void setTimelineMeaningfulSoundDuration(double);
     bool timelineShowThumbnails() const;
     void setTimelineShowThumbnails(bool);
     bool timelineRipple() const;
